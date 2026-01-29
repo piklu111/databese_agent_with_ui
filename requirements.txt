@@ -7,3 +7,4 @@ sqlalchemy
 langchain-community
 psycopg2-binary
 pandas
+openpyxl
