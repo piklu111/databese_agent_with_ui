@@ -6,3 +6,4 @@ langchain-core
 sqlalchemy
 langchain-community
 psycopg2-binary
+pandas
