@@ -4,3 +4,4 @@ streamlit
 langchain
 langchain-core
 sqlalchemy
+langchain-community
