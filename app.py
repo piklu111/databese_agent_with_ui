@@ -6,43 +6,127 @@ from urllib.parse import quote_plus
 from dotenv import load_dotenv
 import os
 import pandas as pd
-import sqlite3
 from sqlalchemy import create_engine
 import tempfile
 import shutil
+import matplotlib.pyplot as plt
+from langchain_openai import ChatOpenAI
+from langchain_community.agent_toolkits import create_sql_agent
+from langchain_core.callbacks import BaseCallbackHandler
+import ast
+
+class SQLCaptureHandler(BaseCallbackHandler):
+    def __init__(self):
+        self.sql_queries = []
+
+    def on_tool_start(self, serialized, input_str, **kwargs):
+        if serialized.get("name") == "sql_db_query":
+            self.sql_queries.append(input_str)
+    
+
+def get_sql_agent(db_uri):
+    db = SQLDatabase.from_uri(db_uri)
+
+    agent = create_sql_agent(
+        llm=model,
+        db=db,
+        agent_type="openai-tools",
+        verbose=True
+    )
+    return agent
+
+
 
 load_dotenv()
 
 st.set_page_config(page_title="Text to SQL Agent", layout="wide")
-
 # ---------------- LLM LOADING ---------------- #
 
+# @st.cache_resource
+# def load_llm():
+#     llm = HuggingFaceEndpoint(
+#         repo_id="openai/gpt-oss-20b",
+#         task="text-generation",
+#         max_new_tokens=500,
+#         #do_sample=False,
+#         # repetition_penalty=1.03,
+#         provider="auto",  # let Hugging Face choose the best provider for you
+#         temperature=0
+#     )
+#     return ChatHuggingFace(llm=llm)
 @st.cache_resource
 def load_llm():
-    llm = HuggingFaceEndpoint(
-        repo_id="openai/gpt-oss-20b",
-        task="text-generation",
-        max_new_tokens=500,
-        #do_sample=False,
-        # repetition_penalty=1.03,
-        provider="auto",  # let Hugging Face choose the best provider for you
-        temperature=0
+    return ChatOpenAI(
+        model="gpt-4o-mini",
+        temperature=0,
+        max_tokens=1000
     )
-    return ChatHuggingFace(llm=llm)
 
 model = load_llm()
 
-# ---------------- SQL AGENT ---------------- #
+def run_sql_and_return_df(db_uri, sql_query):
+    engine = create_engine(db_uri)
+    return pd.read_sql(sql_query, engine)
 
-def get_sql_agent(db_uri):
-    db = SQLDatabase.from_uri(db_uri)
-    agent = create_sql_agent(
-        llm=model,
-        db=db,
-        verbose=True,
-        agent_type="openai-tools"
-    )
-    return agent
+
+def decide_best_chart(question, df):
+    prompt = f"""
+    You are a data visualization expert.
+
+    Question:
+    {question}
+
+    Data:
+    {df.head(10).to_string(index=False)}
+
+    Decide best chart type strictly from:
+    bar, line, pie, scatter, none
+
+    Return only ONE word.
+    """
+    print('prompt', prompt)
+
+    res = model.invoke(prompt)
+    print('res',res)
+    return res.content.strip().lower()
+
+
+def generate_insight(question, df):
+    prompt = f"""
+    You are a senior data analyst.
+
+    Question:
+    {question}
+
+    Result:
+    {df.head(20).to_string(index=False)}
+
+    Write short business insights.
+    """
+
+    res = model.invoke(prompt)
+    return res.content
+
+
+def plot_chart(df, chart_type):
+    st.subheader("📊 Auto Generated Chart")
+
+    if chart_type == "bar":
+        st.bar_chart(df.set_index(df.columns[0]))
+
+    elif chart_type == "line":
+        st.line_chart(df.set_index(df.columns[0]))
+
+    elif chart_type == "scatter":
+        st.scatter_chart(df)
+
+    elif chart_type == "pie":
+        labels = df.iloc[:, 0]
+        values = df.iloc[:, 1]
+
+        fig, ax = plt.subplots()
+        ax.pie(values, labels=labels, autopct="%1.1f%%")
+        st.pyplot(fig)
 
 def create_sqlite_agent_from_file(uploaded_file):
 
@@ -58,7 +142,7 @@ def create_sqlite_agent_from_file(uploaded_file):
     df.to_sql("data", engine, index=False, if_exists="replace")
 
     agent = get_sql_agent(f"sqlite:///{db_path}")
-    return agent, df, temp_dir
+    return agent, df, temp_dir, f"sqlite:///{db_path}"
 # ---------------- UI ---------------- #
 
 # st.title("🤖 Text to SQL Agent using HuggingFace + LangChain")
@@ -185,11 +269,48 @@ with tabs[0]:
                 with st.spinner("Executing query..."):
                     try:
                         agent = get_sql_agent(st.session_state["pg_uri"])
-                        res = agent.invoke({"input": query})
+                        # res = agent.invoke({"input": query})
+                        # print('results from agent :',res)
+                        handler = SQLCaptureHandler()
 
+                        res = agent.invoke(
+                            {"input": query},
+                            config={"callbacks": [handler]}
+                        )
+                        executed_sql = handler.sql_queries[-1] if handler.sql_queries else None
+                        executed_sql = ast.literal_eval(executed_sql).get('query')
+                        print('results from agent :',res)
+                        print('executed_sql from agent :',executed_sql)
                         st.success("Query executed successfully!")
-                        st.markdown("### Answer")
+
+                        # 🔹 Text Answer
+                        st.subheader("🧠 Answer")
                         st.write(res["output"])
+
+                        # 🔹 Extract SQL Query
+
+                        st.markdown("### 🧾 Generated SQL")
+                        st.code(executed_sql, language="sql")
+
+                        print('st.session_state["pg_uri"]',st.session_state["pg_uri"])
+                        # 🔹 Execute SQL → DataFrame
+                        df = run_sql_and_return_df(st.session_state["pg_uri"], executed_sql['query'])
+
+                        st.markdown("### 📋 Query Result")
+                        st.dataframe(df)
+
+                        # 🔹 Decide best chart using LLM
+                        chart_type = decide_best_chart(executed_sql, df)
+
+                        # 🔹 Plot if possible
+                        if chart_type != "none":
+                            plot_chart(df, chart_type)
+
+                        # 🔹 Generate business insights
+                        st.markdown("### 🧠 AI Insights")
+                        insight = generate_insight(executed_sql, df)
+                        st.write(insight)
+
 
                     except Exception as e:
                         st.error(f"❌ Error: {str(e)}")
@@ -257,11 +378,12 @@ with tabs[3]:
     if uploaded_file:
         with st.spinner("Processing file..."):
             if "agent" not in st.session_state:
-                agent, df, temp_dir = create_sqlite_agent_from_file(uploaded_file)
+                agent, df, temp_dir, sqlite_uri = create_sqlite_agent_from_file(uploaded_file)
 
                 st.session_state["agent"] = agent
                 st.session_state["df"] = df
                 st.session_state["temp_dir"] = temp_dir
+                st.session_state["sqlite_uri"] = sqlite_uri
 
             st.success("File uploaded successfully!")
 
@@ -279,12 +401,48 @@ with tabs[3]:
             else:
                 with st.spinner("Running query..."):
                     try:
-                        res = st.session_state["agent"].invoke({"input": question})
+                        handler = SQLCaptureHandler()
+
+                        res = st.session_state["agent"].invoke(
+                            {"input": question},
+                            config={"callbacks": [handler]}
+                        )
+
+                        executed_sql = handler.sql_queries[-1] if handler.sql_queries else None
+                        print('res',res)
+                        print('executed_sql',executed_sql)
+                        executed_sql = ast.literal_eval(executed_sql).get('query')
                         st.success("Query executed successfully!")
-                        st.markdown("### Answer")
+                        print('executed_sql from agent :',executed_sql)
+                        print('results from agent :',res)
+                        # 🔹 Text Answer
+                        st.subheader("🧠 Answer")
                         st.write(res["output"])
 
-                        st.session_state["show_popup"] = True
+                        # 🔹 Extract SQL Query
+                        if executed_sql :
+                            st.markdown("### 🧾 Generated SQL")
+                            st.code(executed_sql, language="sql")
+
+                            print('st.session_state["sqlite_uri"]',st.session_state["sqlite_uri"])
+                            # 🔹 Execute SQL → DataFrame
+                            df = run_sql_and_return_df(st.session_state["sqlite_uri"], executed_sql)
+
+                            st.markdown("### 📋 Query Result")
+                            st.dataframe(df)
+
+                            # 🔹 Decide best chart using LLM
+                            chart_type = decide_best_chart(executed_sql, df)
+
+                            # 🔹 Plot if possible
+                            if chart_type != "none":
+                                plot_chart(df, chart_type)
+
+                            # 🔹 Generate business insights
+                            st.markdown("### 🧠 AI Insights")
+                            insight = generate_insight(executed_sql, df)
+                            st.write(insight)
+
 
                     except Exception as e:
                         st.error(f"❌ Error: {str(e)}")
