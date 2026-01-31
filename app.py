@@ -14,6 +14,28 @@ from langchain_openai import ChatOpenAI
 from langchain_community.agent_toolkits import create_sql_agent
 from langchain_core.callbacks import BaseCallbackHandler
 import ast
+import smtplib
+from email.mime.text import MIMEText
+
+load_dotenv()
+
+#################### Mailing Functionalirt ####################
+
+def send_email(msg,receiver):
+    sender = os.getenv("EMAIL_USER")
+    password = os.getenv("EMAIL_PASSWORD")
+    msg = MIMEText(msg)
+    msg["Subject"] = "Summary analysis from datapilot"
+    msg["From"] = sender
+    msg["To"] = receiver
+
+    with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
+        server.login(sender, password)
+        server.send_message(msg)
+
+    print("Email sent successfully!")
+
+################################################################
 
 class SQLCaptureHandler(BaseCallbackHandler):
     def __init__(self):
@@ -35,9 +57,6 @@ def get_sql_agent(db_uri):
     )
     return agent
 
-
-
-load_dotenv()
 
 st.set_page_config(page_title="Text to SQL Agent", layout="wide")
 # ---------------- LLM LOADING ---------------- #
@@ -418,6 +437,7 @@ with tabs[3]:
                         # 🔹 Text Answer
                         st.subheader("🧠 Answer")
                         st.write(res["output"])
+                        st.session_state["summary"] = res["output"]
 
                         # 🔹 Extract SQL Query
                         if executed_sql :
@@ -443,9 +463,27 @@ with tabs[3]:
                             insight = generate_insight(executed_sql, df)
                             st.write(insight)
 
-
                     except Exception as e:
                         st.error(f"❌ Error: {str(e)}")
+    # ---------------- EMAIL SECTION ----------------
+    if "summary" in st.session_state:
+        st.markdown("---")
+        st.subheader("📧 Send Summary via Email")
+
+        with st.form("email_form"):
+            receiver_email = st.text_input(
+                "Recipient email",
+                placeholder="someone@example.com"
+            )
+            send_btn = st.form_submit_button("📨 Send Email")
+
+        if send_btn:
+            if not receiver_email:
+                st.warning("⚠️ Please enter an email address")
+            else:
+                send_email(st.session_state["summary"], receiver_email)
+                # send_email('This is test email', receiver_email)
+                st.success("📧 Summary sent successfully!")
 # ========= POPUP SECTION (ADD HERE AT BOTTOM) ========= #
 
 if st.session_state.get("show_popup", False):
